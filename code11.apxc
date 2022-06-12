@@ -1,0 +1,15 @@
+public class AccountProcessor {
+    @future
+    public static void countContacts(List<Id> aid){
+      List<Account> accup = new List<Account>();
+        
+        List<Account> acc = [Select Id , Name ,(Select Id from Contacts) from Account where Id in : aid];
+        
+        For(Account acc1: acc){
+            List<Contact> con = acc1.Contacts;
+            acc1.Number_Of_Contacts__c = con.size();
+            accup.add(acc1);
+        }
+        update accup;
+    }
+}

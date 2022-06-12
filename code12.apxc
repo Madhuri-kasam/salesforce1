@@ -1,0 +1,23 @@
+@IsTest
+private class AccountProcessorTest {
+  @IsTest
+    private static void testCountContacts(){
+        Account newacc = new Account(Name='Test Account');
+        insert newacc;
+        
+        Contact newcon = new Contact(FirstName='John',LastName='Doe',AccountId = newacc.Id);
+        insert newcon;
+        
+        Contact newcon1 = new Contact(FirstName='Jane',LastName='Doe',AccountId = newacc.Id);
+        insert newcon1;
+        
+        List<Id> aid = new List<Id>();
+        aid.add(newacc.Id);
+        
+        Test.startTest();
+        AccountProcessor.countContacts(aid);
+        Test.stopTest();
+    } 
+    
+    
+}
