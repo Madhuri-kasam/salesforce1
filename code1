@@ -1,0 +1,282 @@
+Maintenance_Request__c];
+for (AggregateResult ar : results){
+maintenanceCycles.put((Id) ar.get('Maintenance_Request__c'), (Decimal)
+ar.get('cycle'));
+}
+List<Case> newCases = new List<Case>();
+for(Case cc : closedCases.values()){
+Case nc = new Case (
+ParentId = cc.Id,
+Status = 'New',
+Subject = 'Routine Maintenance',
+Type = 'Routine Maintenance',
+Vehicle__c = cc.Vehicle__c,
+Equipment__c =cc.Equipment__c,
+Origin = 'Web',
+Date_Reported__c = Date.Today()
+);
+//If multiple pieces of equipment are used in the maintenance request,
+//define the due date by applying the shortest maintenance cycle to today’s
+date.
+//If (maintenanceCycles.containskey(cc.Id)){
+nc.Date_Due__c = Date.today().addDays((Integer)
+maintenanceCycles.get(cc.Id));
+//} else {
+// nc.Date_Due__c = Date.today().addDays((Integer)
+cc.Equipment__r.maintenance_Cycle__c);
+//}
+newCases.add(nc);
+}
+insert newCases;
+List<Equipment_Maintenance_Item__c> clonedList = new
+List<Equipment_Maintenance_Item__c>();
+for (Case nc : newCases){
+for (Equipment_Maintenance_Item__c clonedListItem :
+closedCases.get(nc.ParentId).Equipment_Maintenance_Items__r){
+Equipment_Maintenance_Item__c item = clonedListItem.clone();
+item.Maintenance_Request__c = nc.Id;
+clonedList.add(item);
+}
+}
+insert clonedList;
+}
+}
+}
+MaintenanceRequest.apxt :-
+trigger MaintenanceRequest on Case (before update, after update) {
+if(Trigger.isUpdate && Trigger.isAfter){
+MaintenanceRequestHelper.updateWorkOrders(Trigger.New, Trigger.OldMap);
+}
+}
+Test Callout Logic
+WarehouseCalloutService Code :
+public with sharing class WarehouseCalloutService implements Queueable {
+private static final String WAREHOUSE_URL = 'https://th-superbadge-
+apex.herokuapp.com/equipment';
+//Write a class that makes a REST callout to an external warehouse system to get a
+list of equipment that needs to be updated.
+//The callout’s JSON response returns the equipment records that you upsert in
+Salesforce.
+@future(callout=true)
+public static void runWarehouseEquipmentSync(){
+System.debug('go into runWarehouseEquipmentSync');
+Http http = new Http();
+HttpRequest request = new HttpRequest();
+request.setEndpoint(WAREHOUSE_URL);
+request.setMethod('GET');
+HttpResponse response = http.send(request);
+List<Product2> product2List = new List<Product2>();
+System.debug(response.getStatusCode());
+if (response.getStatusCode() == 200){
+List<Object> jsonResponse =
+(List<Object>)JSON.deserializeUntyped(response.getBody());
+System.debug(response.getBody());
+//class maps the following fields:
+//warehouse SKU will be external ID for identifying which equipment records to
+update within Salesforce
+for (Object jR : jsonResponse){
+Map<String,Object> mapJson = (Map<String,Object>)jR;
+Product2 product2 = new Product2();
+//replacement part (always true),
+product2.Replacement_Part__c = (Boolean) mapJson.get('replacement');
+//cost
+product2.Cost__c = (Integer) mapJson.get('cost');
+//current inventory
+product2.Current_Inventory__c = (Double) mapJson.get('quantity');
+//lifespan
+product2.Lifespan_Months__c = (Integer) mapJson.get('lifespan');
+//maintenance cycle
+product2.Maintenance_Cycle__c = (Integer)
+mapJson.get('maintenanceperiod');
+//warehouse SKU
+product2.Warehouse_SKU__c = (String) mapJson.get('sku');
+product2.Name = (String) mapJson.get('name');
+product2.ProductCode = (String) mapJson.get('_id');
+product2List.add(product2);
+}
+if (product2List.size() > 0){
+upsert product2List;
+System.debug('Your equipment was synced with the warehouse one');
+}
+}
+}
+public static void execute (QueueableContext context){
+System.debug('start runWarehouseEquipmentSync');
+runWarehouseEquipmentSync();
+System.debug('end runWarehouseEquipmentSync');
+}
+}
+WarehouseCalloutServiceTest Code :
+@IsTest
+private class WarehouseCalloutServiceTest {
+// implement your mock callout test here
+@isTest
+static void testWarehouseCallout() {
+test.startTest();
+test.setMock(HttpCalloutMock.class, new WarehouseCalloutServiceMock());
+WarehouseCalloutService.execute(null);
+test.stopTest();
+List<Product2> product2List = new List<Product2>();
+product2List = [SELECT ProductCode FROM Product2];
+System.assertEquals(3, product2List.size());
+System.assertEquals('55d66226726b611100aaf741',
+product2List.get(0).ProductCode);
+System.assertEquals('55d66226726b611100aaf742',
+product2List.get(1).ProductCode);
+System.assertEquals('55d66226726b611100aaf743',
+product2List.get(2).ProductCode);
+}
+}
+WarehouseCalloutServiceMock Code :
+@isTest
+global class WarehouseCalloutServiceMock implements HttpCalloutMock {
+// implement http mock callout
+global static HttpResponse respond(HttpRequest request) {
+HttpResponse response = new HttpResponse();
+response.setHeader('Content-Type', 'application/json');
+response.setBody('[{"_id":"55d66226726b611100aaf741","replacement":false,"quantity":5
+,"name":"Generator 1000
+kW","maintenanceperiod":365,"lifespan":120,"cost":5000,"sku":"100003"},{"_id":"55d66226
+726b611100aaf742","replacement":true,"quantity":183,"name":"Cooling
+Fan","maintenanceperiod":0,"lifespan":0,"cost":300,"sku":"100004"},{"_id":"55d66226726b6
+11100aaf743","replacement":true,"quantity":143,"name":"Fuse
+20A","maintenanceperiod":0,"lifespan":0,"cost":22,"sku":"100005"}]');
+response.setStatusCode(200);
+return response;
+}
+}
+Test Scheduling Logic
+WarehouseSyncSchedule Code :
+global with sharing class WarehouseSyncSchedule implements Schedulable {
+// implement scheduled code here
+global void execute (SchedulableContext ctx){
+System.enqueueJob(new WarehouseCalloutService());
+}
+}
+WarehouseSyncScheduleTest Code :
+@isTest
+public with sharing class WarehouseSyncScheduleTest {
+// implement scheduled code here
+//
+@isTest static void test() {
+String scheduleTime = '00 00 00 * * ? *';
+Test.startTest();
+Test.setMock(HttpCalloutMock.class, new WarehouseCalloutServiceMock());
+String jobId = System.schedule('Warehouse Time to Schedule to test',
+scheduleTime, new WarehouseSyncSchedule());
+CronTrigger c = [SELECT State FROM CronTrigger WHERE Id =: jobId];
+System.assertEquals('WAITING', String.valueOf(c.State), 'JobId does not match');
+Test.stopTest();
+}
+}
+Apex Triggers :
+Get Started with Apex Trigger
+AccountAddressTrigger Code :
+trigger AccountAddressTrigger on Account (before insert, before update) {
+for (Account a : Trigger.new) {
+if (a.Match_Billing_Address__c == TRUE){
+a.ShippingPostalCode = a.BillingPostalCode;
+}
+}
+}
+Bulk Apex Triggers Unit
+ClosedOpportunityTrigger Code :
+trigger ClosedOpportunityTrigger on Opportunity (after insert, after update) {
+List taskList = new List();
+for (Opportunity o :[SELECT Id,Name FROM Opportunity WHERE Id IN :Trigger.New]){
+taskList.add(new Task(Subject='Follow Up Test Task', WhatId=o.Id, Status='Not Started',
+Priority='Normal'));
+}
+if (taskList.size() > 0)
+{ insert taskList;
+}
+}
+Apex Testing :
+Get Started with Apex Unit Testing
+VerifyDate Code :
+public class VerifyDate {
+//method to handle potential checks against two dates
+public static Date CheckDates(Date date1, Date date2) {
+//if date2 is within the next 30 days of date1, use date2. Otherwise use the end of the
+month
+if(DateWithin30Days(date1,date2)) {
+return date2;
+}
+else {
+return SetEndOfMonthDate(date1);
+}
+}
+//method to check if date2 is within the next 30 days of date1
+private static Boolean DateWithin30Days(Date date1, Date date2) {
+//check for date2 being in the past
+if( date2 < date1) {
+return false;
+}
+//check that date2 is within (>=) 30 days of date1
+Date date30Days = date1.addDays(30);
+//create a date 30 days away from date1
+if( date2 >= date30Days ) {
+return false;
+}
+else {
+return true;
+}
+}
+//method to return the end of the month of a given date
+private static Date SetEndOfMonthDate(Date date1) {
+Integer totalDays = Date.daysInMonth(date1.year(), date1.month());
+Date lastDay = Date.newInstance(date1.year(), date1.month(), totalDays);
+return lastDay;
+}
+}
+TestVerifyDate Code :
+@isTest
+private class TestVerifyDate {
+@isTest
+static void testCheckDates() {
+Date now = Date.today();
+Date lastOfTheMonth = Date.newInstance(now.year(), now.month(),
+Date.daysInMonth(now.year(), now.month()));
+Date plus60 = Date.today().addDays(60);
+Date d1 = VerifyDate.CheckDates(now, now);
+System.assertEquals(now, d1);
+Date d2 = VerifyDate.CheckDates(now, plus60);
+System.assertEquals(lastOfTheMonth, d2);
+}
+}
+Test Apex Triggers Unit
+RestrictContactByName Code :
+trigger RestrictContactByName on Contact (before insert, before update) {
+//check contacts prior to insert or update for invalid data
+For (Contact c : Trigger.New) {
+if(c.LastName == 'INVALIDNAME') {
+//invalidname is invalid
+c.AddError('The Last Name "'+c.LastName+'" is not allowed for DML');
+}
+}
+}
+TestRestrictContactByName Code :
+@isTest
+private class TestRestrictContactByName {
+@isTest
+static void invalidName() {
+try { Contact c = new Contact(LastName='INVALIDNAME');
+insert c;
+}
+catch (Exception e) {
+System.assert(true);
+}
+}
+}
+Create Test Data for Apex Tests :
+RandomContactFactory Code :
+public class RandomContactFactory {
+public static List generateRandomContacts(Integer num, String lastName) {
+List contacts = new List();
+for (Integer i = 0; i < num; i++) {
+Contact c = new Contact(FirstName=i.format(), LastName=lastName);
+contacts.add(c);
+}
+return contacts;
+}
+}
